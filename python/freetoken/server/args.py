@@ -38,6 +38,9 @@ def _nvfp4_entry(value: str) -> str:
 class ServerArgs(SchedulerConfig):
     server_host: str = "127.0.0.1"
     server_port: int = 1919
+    # Bind the API port only once the backend is serving, for supervisors that read a listening
+    # port as readiness. Off keeps the early bind that lets /health report load progress.
+    bind_when_ready: bool = False
     num_tokenizer: int = 0
     silent_output: bool = False
     # The terminal shell is attached to this server (ft shell --model / ft serve --shell-mode).
@@ -352,6 +355,16 @@ def parse_args(
         dest="server_port",
         default=ServerArgs.server_port,
         help="The port number for the server to listen on.",
+    )
+
+    parser.add_argument(
+        "--bind-when-ready",
+        action="store_true",
+        default=ServerArgs.bind_when_ready,
+        help=(
+            "Bind the API port only once the model is loaded, so a listening port means a serving "
+            "model. The default binds first and reports load progress on /health."
+        ),
     )
 
     parser.add_argument(

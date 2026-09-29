@@ -983,6 +983,9 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], "Any"], run_s
     # setting _SHUTTING_DOWN) rather than relying on OS signal-delivery order.
     _GLOBAL_STATE.backend_processes = list(getattr(handle, "processes", None) or [])
 
+    # Set once the backend is serving or has failed; --bind-when-ready holds the port closed until then.
+    settled = threading.Event()
+
     def _on_ready() -> None:
         # A stop requested while weights were loading has already sealed admission.  The backend
         # may finish its ready handshake before SIGTERM arrives; never reopen that gate after the
@@ -991,11 +994,13 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], "Any"], run_s
             _GLOBAL_STATE.maintenance_state = "serving"
             _GLOBAL_STATE.ready_at = time.monotonic()
             logger.info(f"API server is ready to serve on {host}:{port}")
+        settled.set()
 
     def _on_failure(message: str) -> None:
         _GLOBAL_STATE.fatal_error = message
         _GLOBAL_STATE.maintenance_state = "failed"
         logger.error("Backend supervisor: %s", message)
+        settled.set()
         # No CacheRebuildReply will ever arrive from a dead backend, so wake any caller blocked
         # in dispatch_rebuild's await now — otherwise it strands until the full rebuild timeout.
         _GLOBAL_STATE.fail_pending_rebuilds(message)
@@ -1039,5 +1044,12 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], "Any"], run_s
     if run_shell:
         _serve_and_run_shell(host, port)
         return
+    if config.bind_when_ready:
+        # The event decides; the one-second wake only lets a stop signal reach this thread.
+        while not settled.wait(1.0):
+            pass
+        if _GLOBAL_STATE.maintenance_state != "serving":
+            _terminate_backend_workers(_GLOBAL_STATE.backend_processes)
+            raise SystemExit(f"backend did not become ready: {_GLOBAL_STATE.fatal_error or _GLOBAL_STATE.maintenance_state}")
     # uvicorn stays on the main thread (signal handling unchanged); ^C reaches the worker group.
     uvicorn.run(app, host=host, port=port)
