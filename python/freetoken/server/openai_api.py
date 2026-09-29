@@ -60,14 +60,16 @@ def chat_request_to_genspec(
     req: ChatCompletionRequest,
     model_sampling: dict[str, Any],
     default_max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    pinned_effort: str | None = None,
 ) -> GenSpec:
     """OpenAI ChatCompletionRequest -> GenSpec (the OpenAI 'to_sampling_params')."""
-    from .model_meta import effort_toggle_kwargs
+    from .model_meta import effort_toggle_kwargs, pin_thinking_kwargs
 
     ctk = req.chat_template_kwargs
     thinking_type = _thinking_type(req)
     if req.reasoning_effort or thinking_type:
         ctk = effort_toggle_kwargs(req.reasoning_effort, ctk, thinking_type=thinking_type)
+    ctk = pin_thinking_kwargs(ctk, pinned_effort)
     return GenSpec(
         messages=render_messages([m.model_dump(exclude_none=True) for m in req.messages]),
         sampling_params=resolve_sampling(
@@ -185,7 +187,10 @@ async def handle_chat_completion(
         default_max_tokens = (
             getattr(state.config, "max_output_tokens", None) or DEFAULT_MAX_OUTPUT_TOKENS
         )
-        spec = chat_request_to_genspec(req, model_sampling, default_max_tokens=default_max_tokens)
+        spec = chat_request_to_genspec(
+            req, model_sampling, default_max_tokens=default_max_tokens,
+            pinned_effort=getattr(state.config, "pin_reasoning_effort", None),
+        )
     except ValueError as exc:
         return create_error_response(str(exc))
 

@@ -120,6 +120,7 @@ async def handle_anthropic_messages(
             default_max_tokens=(
                 getattr(state.config, "max_output_tokens", None) or DEFAULT_MAX_OUTPUT_TOKENS
             ),
+            pinned_effort=getattr(state.config, "pin_reasoning_effort", None),
         )
         uid = await submit_generation(spec, state)
     except ValueError as exc:
@@ -308,10 +309,14 @@ def convert_anthropic_to_genspec(
     model_sampling: dict[str, Any],
     reasoning_parser: str | None = None,
     default_max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    pinned_effort: str | None = None,
 ) -> GenSpec:
+    from .model_meta import pin_thinking_kwargs
+
     messages, template_tools, parser_tools, ctk = convert_anthropic_prompt(
         req, reasoning_parser=reasoning_parser
     )
+    ctk = pin_thinking_kwargs(ctk, pinned_effort)
     return GenSpec(
         messages=messages,
         sampling_params=resolve_sampling(

@@ -119,6 +119,15 @@ def effort_toggle_kwargs(
     return mapped
 
 
+def pin_thinking_kwargs(chat_template_kwargs: dict, pinned_effort: str | None) -> dict:
+    """The server's pinned effort outranks the request, thinking on; applied where each protocol
+    builds its GenSpec, so the chat template and the reasoning parser read the same kwargs."""
+    if pinned_effort is None:
+        return chat_template_kwargs
+    unrelated = {k: v for k, v in chat_template_kwargs.items() if k not in _THINKING_KWARG_KEYS}
+    return {**unrelated, **thinking_toggle_kwargs(True), "reasoning_effort": pinned_effort}
+
+
 def moe_total_experts(config: Any) -> int:
     """Total routed-expert slots the model has: experts per layer x MoE layers. Matches the
     engine's own basis (``Engine._resolve_auto_moe_cache_size``), so a residency rate derived

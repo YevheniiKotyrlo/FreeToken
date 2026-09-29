@@ -29,13 +29,14 @@ def run(coro):
 
 
 class FakeState:
-    def __init__(self, reasoning_parser: str | None = None) -> None:
+    def __init__(self, reasoning_parser: str | None = None, pin_reasoning_effort: str | None = None) -> None:
         self.config = SimpleNamespace(
             mm=SimpleNamespace(text_model_only=False, disabled_encoders=frozenset()),
             model_path="/models/unit-model",
             served_model_name="unit-model",
             tool_call_parser="llama3",
             reasoning_parser=reasoning_parser,
+            pin_reasoning_effort=pin_reasoning_effort,
         )
         self.sent: TokenizeMsg | None = None
 
@@ -132,6 +133,51 @@ def test_thinking_disabled_reaches_the_tokenizer_as_enable_thinking_false():
     assert not isinstance(response, JSONResponse)  # plain successful completion
     assert state.sent is not None
     assert state.sent.chat_template_kwargs == OFF
+
+
+PINNED = {**ON, "reasoning_effort": "xhigh"}
+
+
+def test_a_pinned_effort_outranks_a_client_that_disables_thinking():
+    state = FakeState(reasoning_parser="qwen3", pin_reasoning_effort="xhigh")
+    run(handle_chat_completion(chat_request(thinking={"type": "disabled"}), None, state, {}))
+    assert state.sent is not None
+    assert state.sent.chat_template_kwargs == PINNED
+
+
+def test_a_pinned_effort_outranks_a_lower_client_effort():
+    state = FakeState(reasoning_parser="qwen3", pin_reasoning_effort="xhigh")
+    run(handle_chat_completion(chat_request(reasoning_effort="low"), None, state, {}))
+    assert state.sent is not None
+    assert state.sent.chat_template_kwargs == PINNED
+
+
+def test_the_pin_replaces_thinking_kwargs_and_keeps_the_rest():
+    state = FakeState(reasoning_parser="qwen3", pin_reasoning_effort="xhigh")
+    kwargs = {"enable_thinking": False, "reasoning_effort": "low", "preserve_thinking": False}
+    run(handle_chat_completion(chat_request(chat_template_kwargs=kwargs), None, state, {}))
+    assert state.sent is not None
+    assert state.sent.chat_template_kwargs == {**PINNED, "preserve_thinking": False}
+
+
+def test_without_a_pin_the_client_still_decides():
+    state = FakeState(reasoning_parser="qwen3")
+    run(handle_chat_completion(chat_request(thinking={"type": "disabled"}), None, state, {}))
+    assert state.sent is not None
+    assert state.sent.chat_template_kwargs == OFF
+
+
+def test_the_pin_reaches_the_anthropic_and_responses_builders():
+    from freetoken.server.anthropic_api import AnthropicMessagesRequest, convert_anthropic_to_genspec
+    from freetoken.server.responses_api import ResponsesRequest, convert_responses_to_genspec
+
+    anthropic = AnthropicMessagesRequest(
+        model="unit-model", max_tokens=16, messages=[{"role": "user", "content": "hi"}],
+        thinking={"type": "disabled"},
+    )
+    responses = ResponsesRequest(model="unit-model", input="hi", reasoning={"effort": "none"})
+    assert convert_anthropic_to_genspec(anthropic, {}, pinned_effort="xhigh").chat_template_kwargs == PINNED
+    assert convert_responses_to_genspec(responses, {}, pinned_effort="xhigh").chat_template_kwargs == PINNED
 
 
 def test_off_and_mixed_case_efforts_stay_accepted():

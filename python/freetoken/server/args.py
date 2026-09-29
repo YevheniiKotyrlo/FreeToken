@@ -49,6 +49,9 @@ class ServerArgs(SchedulerConfig):
     # Reasoning parser that splits <think> reasoning from content for OpenAI
     # responses. None disables it (default for models without a reasoning protocol).
     reasoning_parser: str | None = None
+    # Reasoning effort every request is served at, thinking on, whatever the client sends.
+    # None honours each request's own effort and thinking toggle.
+    pin_reasoning_effort: str | None = None
     # "model": fill unspecified request sampling params from generation_config.json
     # (temperature/top_k/top_p), like sglang. "none": use framework defaults only.
     sampling_defaults: str = "model"
@@ -580,6 +583,15 @@ def parse_args(
             "for OpenAI responses. 'auto' selects per model family (gpt-oss Harmony, "
             "<think> for qwen3/glm/minimax, <mm:think> for minimax-m3, ATEM to=self "
             "channels for muse-glimmer, gemma thought, dsv4); 'off' disables it."
+        ),
+    )
+
+    parser.add_argument(
+        "--pin-reasoning-effort",
+        default=ServerArgs.pin_reasoning_effort,
+        help=(
+            "Serve every request with thinking on at this reasoning effort (e.g. 'xhigh'), "
+            "overriding the effort and thinking toggle a client sends. Unset honours each request."
         ),
     )
 
