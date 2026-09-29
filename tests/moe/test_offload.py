@@ -1,3 +1,4 @@
+import sys
 from contextlib import contextmanager
 
 import pytest
@@ -428,7 +429,7 @@ def test_adjust_config_converts_moe_cache_rate_to_cache_size(monkeypatch):
         model_path="/tmp/freetoken-test-model",
         tp_info=DistributedInfo(rank=0, size=1),
         dtype=torch.float16,
-        attention_backend="triton" if torch.version.hip is not None else "fi",
+        attention_backend="triton" if torch.version.hip is not None or sys.platform == "win32" else "fi",
         moe_cache_rate=0.3,
     )
     object.__setattr__(
