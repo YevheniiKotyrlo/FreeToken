@@ -139,15 +139,32 @@ class CacheManager:
                 self._free(ev.kv_indices)
 
     def ensure_mamba_slots(self, n: int) -> None:
-        """Free GDN state slots until >= ``n`` are available by tombstoning LRU tree snapshots
-        (evict_mamba), returning their slots + any freed KV to the pools."""
-        while self.linear_state_pool.num_free_slots < n:
-            er = self.prefix_cache.evict_mamba(n - self.linear_state_pool.num_free_slots)
+        """Free GDN state slots until >= ``n`` are available by evicting LRU tree snapshots
+        (evict_mamba), returning their slots + any freed KV to the pools. With a host bank an
+        evicted snapshot is copied into it rather than dropped, so the caller must be
+        stream-ordered as ``archive_chunk_track``'s is: after the forward that wrote the snapshot
+        and before the next one (admission and the chunk commit both are)."""
+        pool = self.linear_state_pool
+        while pool.num_free_slots < n:
+            need = n - pool.num_free_slots
+            offered = (pool.alloc_host(min(need, pool.num_free_host_slots))
+                       if self.mamba_host_enabled else None)
+            er = self.prefix_cache.evict_mamba(need, host_slots=offered)
+            for slot, host in er.demoted:
+                pool.to_host(slot, host)
+            if offered:
+                moved = {host for _, host in er.demoted}
+                pool.free_host([host for host in offered if host not in moved])
+            if er.demoted:
+                logger.info_rank0(
+                    f"GDN bank: moved evicted snapshot(s) to host slots "
+                    f"{[host for _, host in er.demoted]} "
+                    f"({pool.num_free_host_slots}/{pool.num_host_slots - 1} free)")
             if not er.mamba_slots:
                 break
-            self.linear_state_pool.free(er.mamba_slots)
+            pool.free(er.mamba_slots)
             self._free(er.kv_indices)
-            self.linear_state_pool.free_host(er.host_slots)
+            pool.free_host(er.host_slots)
 
     # ------------------------------------------------------------------ mamba host bank
     @property
