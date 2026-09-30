@@ -10,7 +10,9 @@ these drive HybridRadixCache directly and pin the invariants the bank could actu
   * the 'a leaf always carries a snapshot' cascade treats a bank copy as a snapshot, so an
     internal node whose device snapshot is gone survives as a resume point -- and when the
     KV under a bank copy is finally evicted, the slot goes back;
-  * ``evict_host`` is LRU over unlocked bank copies and frees no KV.
+  * ``evict_host`` is LRU over unlocked bank copies and frees no KV;
+  * a device snapshot evicted while the bank has a slot for it -- a free one, or an older
+    bank copy's -- moves there instead of being dropped.
 """
 from __future__ import annotations
 
@@ -178,21 +180,22 @@ def test_without_a_bank_eviction_drops_the_snapshot_as_before():
 
 
 def test_one_chunk_turns_stay_resumable_past_the_device_slots():
-    """Eight turns, each one prefill chunk long, while the card keeps four snapshots: a replay
-    that departs after turn 2 resumes at turn 2's boundary instead of prefilling everything."""
-    for bank in (True, False):
+    """Eight turns, each one prefill chunk long, while the card keeps four snapshots: with the
+    bank a replay departing after any turn resumes at that turn's boundary; without it, only
+    after the four turns whose snapshot the card kept. Every walk gives a chain's ancestors one
+    timestamp, so which four is a heap tie; the count is what the bank decides."""
+    turns = range(1, 9)
+    for bank, resumable in ((True, 8), (False, 4)):
         c = cache()
         free_bank = list(range(1, 9))
         device_slots = 4
-        for turn in range(1, 9):
+        for turn in turns:
             c.insert(ids(*range(1, turn + 1)), kv(4 * turn), 100 + turn)
             while c.mamba_evictable > device_slots:
                 offered = free_bank[:1] if bank else None
                 er = c.evict_mamba(1, host_slots=offered)
                 used = {host for _, host in er.demoted}
                 free_bank = [slot for slot in free_bank if slot not in used]
-        m = c.match_prefix(ids(1, 2, 9))
-        assert m.cached_len == (8 if bank else 0), bank
-        if bank:
-            assert m.mamba_host is not None
+        resumed = [c.match_prefix(ids(*range(1, turn + 1), 99)).cached_len for turn in turns]
+        assert sum(end == 4 * turn for turn, end in zip(turns, resumed)) == resumable, (bank, resumed)
         c.check_integrity()
