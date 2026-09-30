@@ -127,3 +127,72 @@ def test_locked_bank_slot_survives_bank_pressure():
     c.dec_lock(node)
     assert c.evict_host(1) == [5] and len(c._host_nodes()) == 0
     c.check_integrity()
+
+
+def test_an_evicted_device_snapshot_moves_into_an_offered_bank_slot():
+    """A prompt that fits one prefill chunk freezes no intermediate checkpoint, so its end-of-turn
+    device snapshot is its only resume point: evicting it must move it into the bank, not drop it."""
+    c = cache()
+    c.insert(ids(1, 2), kv(8), 11)                   # one node [0,8), device at 8
+    er = c.evict_mamba(1, host_slots=[5])
+    assert er.demoted == [(11, 5)] and er.mamba_slots == [11]
+    assert er.kv_indices.numel() == 0, "the KV stays: the bank copy resumes from it"
+    m = c.match_prefix(ids(1, 2))
+    assert m.cached_len == 8 and m.mamba_value is None and m.mamba_host == 5
+    assert c.mamba_evictable == 0 and c.mamba_host_evictable == 1
+    c.check_integrity()
+
+
+def test_a_full_bank_gives_a_demotion_only_an_older_checkpoints_slot():
+    """With no free slot, the evicted snapshot takes the slot of the least recently used bank
+    checkpoint if that one is older -- and is dropped as before if every bank copy is newer."""
+    for bank_older in (True, False):
+        c = cache()
+        c.insert(ids(1), kv(4), 11)                  # branch A: device at 4
+        c.insert(ids(2, 3), kv(8), 12)               # branch B: device at 8
+        assert c.attach_host(ids(2), 6)              # B's [0,4) in the bank
+        device_a = c.match_prefix(ids(1)).node
+        bank_b = c.match_prefix(ids(2)).node
+        device_b = c.match_prefix(ids(2, 3)).node
+        device_a.timestamp, device_b.timestamp = 20, 30   # A is the device LRU
+        bank_b.timestamp = 10 if bank_older else 25
+        er = c.evict_mamba(1, host_slots=[])
+        if bank_older:
+            assert er.demoted == [(11, 6)], "the older bank copy gives way"
+            assert c.match_prefix(ids(1)).mamba_host == 6
+            assert c.match_prefix(ids(2)).cached_len == 0, "B's [0,4) is no longer resumable"
+        else:
+            assert er.demoted == [] and er.mamba_slots == [11]
+            assert c.match_prefix(ids(1)).cached_len == 0, "A was the oldest: dropped as before"
+            assert c.match_prefix(ids(2)).mamba_host == 6
+        c.check_integrity()
+
+
+def test_without_a_bank_eviction_drops_the_snapshot_as_before():
+    c = cache()
+    c.insert(ids(1, 2), kv(8), 11)
+    er = c.evict_mamba(1)
+    assert er.demoted == [] and er.mamba_slots == [11] and er.kv_indices.numel() == 8
+    assert c.match_prefix(ids(1, 2)).cached_len == 0
+    c.check_integrity()
+
+
+def test_one_chunk_turns_stay_resumable_past_the_device_slots():
+    """Eight turns, each one prefill chunk long, while the card keeps four snapshots: a replay
+    that departs after turn 2 resumes at turn 2's boundary instead of prefilling everything."""
+    for bank in (True, False):
+        c = cache()
+        free_bank = list(range(1, 9))
+        device_slots = 4
+        for turn in range(1, 9):
+            c.insert(ids(*range(1, turn + 1)), kv(4 * turn), 100 + turn)
+            while c.mamba_evictable > device_slots:
+                offered = free_bank[:1] if bank else None
+                er = c.evict_mamba(1, host_slots=offered)
+                used = {host for _, host in er.demoted}
+                free_bank = [slot for slot in free_bank if slot not in used]
+        m = c.match_prefix(ids(1, 2, 9))
+        assert m.cached_len == (8 if bank else 0), bank
+        if bank:
+            assert m.mamba_host is not None
+        c.check_integrity()
