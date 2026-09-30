@@ -303,6 +303,35 @@ def test_archive_lands_in_the_list_the_continuation_already_carries():
     assert chunk2.mamba_host_tracks == chunk1.mamba_host_tracks == [(64, chunk2.mamba_host_tracks[0][1])]
 
 
+def test_device_pressure_moves_a_turns_end_state_into_the_bank():
+    """A turn that fit one prefill chunk leaves one resume point: its end state, on the device.
+    Evicting it under device pressure must copy it into the bank, where the next turn restores
+    that state; bank slots offered to the eviction and left unused come back."""
+    pool = _pool(num_slots=8, host_slots=8)
+    pt = torch.zeros(4, 512, dtype=torch.int32)
+    cm = CacheManager(64, 64, pt, "hybrid_radix", linear_state_pool=pool)
+    ids = list(range(1, 129))
+    req = _chunked_prompt_request(cm, pool, pt, ids, 128)
+    req.cached_len = 128
+    pool.recurrent_states[:, req.linear_slot_idx] = 128.0
+    cm.cache_req(req, finished=True)                # the tree owns the live slot: the end state
+    held = pool.alloc(pool.num_free_slots)          # every other device slot is a request's
+    bank_free = pool.num_free_host_slots
+
+    cm.ensure_mamba_slots(3)                        # one snapshot to evict, three slots wanted
+
+    hit = cm.match_req(_pend(ids + list(range(1000, 1064))))
+    assert hit.cuda_handle.cached_len == 128, "the next turn resumes instead of prefilling again"
+    assert hit.mamba_value is None and hit.mamba_host is not None
+    assert pool.num_free_slots == 1 and pool.num_free_host_slots == bank_free - 1
+    reused = pool.alloc(1)[0]
+    pool.recurrent_states[:, reused] = 0.0          # the freed slot's next writer
+    pool.from_host(hit.mamba_host, reused)
+    assert pool.recurrent_states[:, reused].unique().tolist() == [128.0]
+    pool.free(held + [reused])
+    cm.check_integrity()
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
