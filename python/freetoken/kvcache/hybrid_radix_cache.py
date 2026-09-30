@@ -56,6 +56,9 @@ class EvictResult(NamedTuple):
     # Bank slots freed alongside (KV eviction kills a host checkpoint too: resuming needs the
     # KV of the prefix the checkpoint describes).
     host_slots: List[int] = []
+    # (device slot, bank slot) per snapshot moved into the bank instead of dropped: the caller
+    # copies each one out before the device slot is reused.
+    demoted: List[Tuple[int, int]] = []
 
 
 class HybridRadixCache:
@@ -139,9 +142,7 @@ class HybridRadixCache:
             return False
         if node.mamba_value is not None or node.mamba_host is not None:
             return False
-        node.mamba_host = host_idx
-        if node.mamba_host_ref_count == 0:
-            self.mamba_host_evictable += 1
+        self._attach_host(node, host_idx)
         return True
 
     def evict_host(self, num: int) -> List[int]:
@@ -226,18 +227,32 @@ class HybridRadixCache:
                 heapq.heappush(leaves, parent)
         return EvictResult(torch.cat(kv) if kv else self.empty, mamba, host)
 
-    def evict_mamba(self, num: int) -> EvictResult:
+    def evict_mamba(self, num: int, host_slots: Optional[List[int]] = None) -> EvictResult:
         """Evict GDN snapshots by LRU over UNLOCKED snapshot-bearing nodes -- internal nodes
         too. Internal node -> TOMBSTONE (free the slot, keep KV + children). Leaf node -> free
         both KV and slot and unlink, then cascade-delete any KV-only tombstone leaves it exposes
-        upward (so a leaf always carries a live snapshot -- mirrors sglang)."""
+        upward (so a leaf always carries a live snapshot -- mirrors sglang).
+
+        ``host_slots`` are free bank slots the caller offers. An evicted snapshot moves into one,
+        else into the slot of a bank checkpoint older than it, and its node is then tombstoned
+        like any node with a bank checkpoint; ``demoted`` names the copies the caller makes."""
         cands = [n for n in self._snapshot_nodes() if n.mamba_ref_count == 0]
         heapq.heapify(cands)
-        kv, mamba, freed = [], [], 0
+        offered = list(host_slots or ())
+        bank: List[RadixTreeNode] = []
+        if host_slots is not None:
+            bank = [n for n in self._host_nodes() if n.mamba_host_ref_count == 0]
+            heapq.heapify(bank)
+        kv, mamba, demoted, freed = [], [], [], 0
         while freed < num and cands:
             node = heapq.heappop(cands)
             if node.mamba_value is None or node.mamba_ref_count != 0 or node.is_root():
                 continue
+            if host_slots is not None and node.mamba_host is None:
+                host = self._bank_slot_for(node, offered, bank)
+                if host is not None:
+                    demoted.append((node.mamba_value, host))
+                    self._attach_host(node, host)
             if node.is_leaf() and node.ref_count == 0 and node.mamba_host is None:
                 # A leaf that keeps a bank checkpoint still has a reason to exist, so it is
                 # tombstoned (KV kept) rather than deleted -- that checkpoint is the resume point.
@@ -249,7 +264,27 @@ class HybridRadixCache:
             else:
                 self._free_node_mamba(node, mamba)  # tombstone internal (or locked-KV) node
                 freed += 1
-        return EvictResult(torch.cat(kv) if kv else self.empty, mamba)
+        return EvictResult(torch.cat(kv) if kv else self.empty, mamba, demoted=demoted)
+
+    def _bank_slot_for(
+        self, node: RadixTreeNode, offered: List[int], bank: List[RadixTreeNode]
+    ) -> Optional[int]:
+        """A bank slot for ``node``'s evicted snapshot: an offered free one, else the slot of the
+        least recently used unlocked bank checkpoint when that one is older than ``node``."""
+        if offered:
+            return offered.pop()
+        while bank:
+            oldest = bank[0]
+            if oldest.mamba_host is None or oldest.mamba_host_ref_count != 0:
+                heapq.heappop(bank)
+                continue
+            if not oldest < node:
+                return None
+            heapq.heappop(bank)
+            reclaimed: List[int] = []
+            self._detach_host(oldest, reclaimed)
+            return reclaimed[0]
+        return None
 
     @property
     def full_evictable_size(self) -> int:
@@ -286,6 +321,11 @@ class HybridRadixCache:
             node.mamba_value = None
             if node.mamba_ref_count == 0:
                 self.mamba_evictable -= 1
+
+    def _attach_host(self, node: RadixTreeNode, host_idx: int) -> None:
+        node.mamba_host = host_idx
+        if node.mamba_host_ref_count == 0:
+            self.mamba_host_evictable += 1
 
     def _detach_host(self, node: RadixTreeNode, out: List[int]) -> None:
         if node.mamba_host is None:
