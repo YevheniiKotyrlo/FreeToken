@@ -1000,7 +1000,6 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], "Any"], run_s
         _GLOBAL_STATE.fatal_error = message
         _GLOBAL_STATE.maintenance_state = "failed"
         logger.error("Backend supervisor: %s", message)
-        settled.set()
         # No CacheRebuildReply will ever arrive from a dead backend, so wake any caller blocked
         # in dispatch_rebuild's await now — otherwise it strands until the full rebuild timeout.
         _GLOBAL_STATE.fail_pending_rebuilds(message)
@@ -1008,6 +1007,7 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], "Any"], run_s
         # a person is sitting at that TUI, the API is theirs alone, and its stop path is ^C.
         if not run_shell:
             _exit_after_backend_death(BACKEND_DEATH_EXIT_GRACE_S)
+        settled.set()
 
     def _on_meta(meta: dict) -> None:
         # Per-unit cache VRAM costs + the free-VRAM seed + per-pool floors + the actual pool

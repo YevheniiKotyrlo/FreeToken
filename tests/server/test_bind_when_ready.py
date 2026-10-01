@@ -25,13 +25,17 @@ def _config(bind_when_ready: bool) -> ServerArgs:
     )
 
 
+# Converts a supervisor that never finishes into a failure; the fakes below finish in milliseconds.
+HANG_GUARD_SECONDS = 10.0
 BOUND = threading.Event()
+SUPERVISED = threading.Event()
 
 
 @pytest.fixture
-def events(monkeypatch) -> list[str]:
+def events(monkeypatch):
     recorded: list[str] = []
     BOUND.clear()
+    SUPERVISED.clear()
 
     def bind(*args, **kwargs) -> None:
         recorded.append("bind")
@@ -43,22 +47,27 @@ def events(monkeypatch) -> list[str]:
     monkeypatch.setattr(api, "app", FastAPI())
     monkeypatch.setattr(api, "_exit_after_backend_death", lambda grace_s: recorded.append("exit"))
     monkeypatch.setattr(api.uvicorn, "run", bind)
-    return recorded
+    yield recorded
+    # the supervisor thread reports into module state, which monkeypatch restores right after
+    assert SUPERVISED.wait(HANG_GUARD_SECONDS), "the backend supervisor outlived its test"
 
 
 def _supervisor_that(outcome: str, events: list[str], release: threading.Event):
     def fake_supervisor(handle, progress, on_ready, *, on_failure, on_meta, is_shutting_down):
-        events.append("loading")
-        release.wait(5.0)
-        # A server that binds early does so now, while this backend still reports loading; one that
-        # holds the port never sets BOUND, and the window only bounds how long that absence is watched.
-        BOUND.wait(2.0)
-        if outcome == "ready":
-            events.append("ready")
-            on_ready()
-        else:
-            events.append("failed")
-            on_failure("weights did not fit")
+        try:
+            events.append("loading")
+            release.wait(HANG_GUARD_SECONDS)
+            # A server that binds early does so now, while this backend still reports loading; one that
+            # holds the port never sets BOUND, and the window only bounds how long that absence is watched.
+            BOUND.wait(2.0)
+            if outcome == "ready":
+                events.append("ready")
+                on_ready()
+            else:
+                events.append("failed")
+                on_failure("weights did not fit")
+        finally:
+            SUPERVISED.set()
 
     return fake_supervisor
 
@@ -90,4 +99,6 @@ def test_without_the_flag_the_port_opens_while_loading(monkeypatch, events):
     api.run_api_server(_config(bind_when_ready=False), _no_workers, run_shell=False)
     bound_while = list(events)
     release.set()
-    assert bound_while == ["loading", "bind"]
+    # the supervisor thread reports "loading" whenever the scheduler runs it; what matters is
+    # that the port was open before the backend was ready
+    assert "bind" in bound_while and "ready" not in bound_while
