@@ -575,7 +575,7 @@ def test_moe_pool_flags_and_decode_batch_clamp():
     assert (config.max_running_req, config.cuda_graph_max_bs, config.cuda_graph_bs) == (2, 2, [1, 2])
 
 
-# ---- slots_to_free_for_reserve: the startup fit to a max-length prefill ----
+# ---- the startup fit to a max-length prefill: slots_to_free_for_reserve, Engine._fit_prefill_peak ----
 
 MIB = 1 << 20
 EXPERT_BYTES = 2_772_480  # one NVFP4 expert of Qwen3.8-Flash-Next
@@ -610,7 +610,7 @@ class _ReserveFitEngine:
     def _free_memory_across_ranks(self) -> tuple[int, int]:
         return self.free, self.free
 
-    def _target_moe_and_expert_bytes(self, moe_cache_size):
+    def _target_moe_and_expert_bytes(self, moe_cache_size, pool_sizes):
         return self.moe_offload_cache.cache_size, EXPERT_BYTES
 
     def rebuild_runtime_cache(self, *, moe_cache_size: int) -> None:
