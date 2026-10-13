@@ -1,3 +1,4 @@
+import importlib.util
 import sys
 from contextlib import contextmanager
 
@@ -1123,6 +1124,10 @@ def test_locked_layer_copy_missing_rejects_ensure_experts_staging():
         cache.copy_missing()
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("freetoken.kernel._cpu_moe") is None,
+    reason="the CPU MoE executor is not built on this platform (setup.py)",
+)
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 @pytest.mark.parametrize("memops", [True, False])
 def test_locked_hybrid_layer_fetches_through_staging_in_a_graph(monkeypatch, memops):
