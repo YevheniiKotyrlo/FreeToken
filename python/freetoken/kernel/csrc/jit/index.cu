@@ -118,15 +118,15 @@ struct IndexKernel {
     // the table may live in pinned host memory, read zero-copy
     TensorMatcher({-1, D}) //
         .with_dtype(weights_dtype_)
-        .with_device<kDLCUDA, kDLROCM, kDLCUDAHost, kDLROCMHost, kDLCPU>()
+        .template with_device<kDLCUDA, kDLROCM, kDLCUDAHost, kDLROCMHost, kDLCPU>()
         .verify(weights);
     TensorMatcher({L, D}) //
         .with_dtype(weights_dtype_)
-        .with_device<kDLCUDA, kDLROCM>(device_)
+        .template with_device<kDLCUDA, kDLROCM>(device_)
         .verify(output);
     TensorMatcher({L}) //
-        .with_dtype<int32_t, int64_t>(indices_dtype_)
-        .with_device<kDLCUDA, kDLROCM>(device_)
+        .template with_dtype<int32_t, int64_t>(indices_dtype_)
+        .template with_device<kDLCUDA, kDLROCM>(device_)
         .verify(indices);
 
     const auto device = device_.unwrap();
